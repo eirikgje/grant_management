@@ -17,14 +17,15 @@ def get_end_of_month_date(date):
     return end_time
 
 
-def plot_percentage(axes, date, new_percentage, curr_percentage, y0, color):
+def plot_percentage(axes, date, new_percentage, curr_percentage, y0, color,
+                    hatch=None):
     end_of_month = get_end_of_month_date(date)
     width = end_of_month - date
     x0 = date
     start_height = y0 + curr_percentage / 100
     bar_height = new_percentage / 100
     axes.add_patch(patches.Rectangle([x0, start_height], width, bar_height,
-                                     facecolor=color))
+                                     facecolor=color, hatch=hatch))
     return axes
 
 
@@ -37,11 +38,13 @@ def month_iterator(start_time, end_time):
         new_time = curr_time + delta
         new_time = datetime.datetime.replace(new_time, day=1)
         curr_time = new_time
+        if (curr_time.year == end_time.year and curr_time.month > end_time.month) or (curr_time.year > end_time.year):
+            break
         yield new_time
 
 
 def make_coverage_plot(personnel, allocations,
-                       start_time=datetime.datetime.strptime('01-01-2025',
+                       start_time=datetime.datetime.strptime('01-01-2024',
                                                              '%d-%m-%Y'),
                        end_time=None):
     alloc_start_time, alloc_end_time = plot_utils.determine_plot_timelines(allocations)
@@ -56,21 +59,37 @@ def make_coverage_plot(personnel, allocations,
     num_entries = len(personnel)
     colors = plot_utils.get_project_colors()
     ticks = []
-    for date in month_iterator(start_time, end_time):
-        y0 = 0.5
-        for person in personnel:
+    y0 = 0.5
+    for person in personnel:
+        person_start_date = start_time if person['start_date'] == "None" else person['start_date']
+        person_end_date = end_time if person['end_date'] == "None" else person['end_date']
+        curr_start_date = max(start_time, person_start_date)
+        curr_end_date = min(end_time, person_end_date)
+        for date in month_iterator(curr_start_date, curr_end_date):
             curr_percentage = 0
             for allocation in allocations:
                 if allocation["name"] == person["name"]:
                     if is_covered_by_allocation(date, allocation):
                         currcolor = colors[allocation["project"]]
+                        financing = allocation["financing"]
+                        if financing == 'external':
+                            hatch = None
+                        else:
+                            hatch = '//'
                         axs = plot_percentage(axs, date,
                                               allocation["percentage"],
-                                              curr_percentage, y0, currcolor)
+                                              curr_percentage, y0, currcolor,
+                                              hatch=hatch)
                         curr_percentage += allocation["percentage"]
                         if curr_percentage > 100:
-                            print("Warning! Higher than 100 percentage")
-            y0 += 1
+                            print(curr_percentage)
+                            print(date)
+                            print(f"Warning! Higher than 100 percentage: {person['name']}")
+            if curr_percentage < 100:
+                axs = plot_percentage(axs, date, 100-curr_percentage,
+                                      curr_percentage, y0, colors['Basis'],
+                                      hatch=None)
+        y0 += 1
     y0 = 0.5
     for person in personnel:
         ticks.append(person["name"])

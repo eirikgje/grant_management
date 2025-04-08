@@ -5,6 +5,25 @@ import matplotlib.dates as mdates
 import plot_utils
 
 
+def is_covered_by_allocation(month, allocation):
+    return (allocation['start_date'] <= month and allocation['end_date'] >=
+            month)
+
+
+def month_iterator(start_time, end_time):
+    curr_time = start_time
+    delta = datetime.timedelta(days=31)
+    new_time = curr_time
+    yield new_time
+    while new_time < end_time:
+        new_time = curr_time + delta
+        new_time = datetime.datetime.replace(new_time, day=1)
+        curr_time = new_time
+        if (curr_time.year == end_time.year and curr_time.month > end_time.month) or (curr_time.year > end_time.year):
+            break
+        yield new_time
+
+
 def gantt_plot_project(project, axes, bar_height, y0, color,
                        default_start_time=None, default_end_time=None):
     if project['start_date'] == "None":
@@ -19,7 +38,7 @@ def gantt_plot_project(project, axes, bar_height, y0, color,
 
 
 def gantt_plot_allocation(allocation, axes, bar_height, y0, color,
-                          start_time=None, end_time=None):
+                          start_time=None, end_time=None, hatch=None):
     if start_time is None or start_time < allocation['start_date']:
         start_time = allocation['start_date']
     if end_time is None or end_time > allocation['end_date']:
@@ -27,7 +46,7 @@ def gantt_plot_allocation(allocation, axes, bar_height, y0, color,
     width = end_time - start_time
     x0 = start_time
     rectangle = patches.Rectangle([x0, y0], width, bar_height, facecolor=color,
-                                  alpha=0.6)
+                                  alpha=0.6, hatch=hatch)
     axes.add_patch(rectangle)
     rx, ry = rectangle.get_xy()
     cx = rx + rectangle.get_width() / 2.0
@@ -35,6 +54,51 @@ def gantt_plot_allocation(allocation, axes, bar_height, y0, color,
     axes.annotate(f'{allocation["percentage"]}%', (cx, cy), color='k',
                   weight='bold', fontsize=15, ha='center', va='center')
     return axes
+
+
+def fill_basis(personnel, allocations, start_time, end_time):
+    for person in personnel:
+        person_start_date = start_time if person['start_date'] == "None" else person['start_date']
+        person_end_date = end_time if person['end_date'] == "None" else person['end_date']
+        curr_basis_start = None
+        curr_basis_percentage = None
+        prev_date = None
+        for curr_date in month_iterator(person_start_date, person_end_date):
+            curr_percentage = 0
+            for allocation in allocations:
+                if allocation["name"] == person["name"]:
+                    if is_covered_by_allocation(curr_date, allocation):
+                        curr_percentage += allocation["percentage"]
+            if curr_basis_start is None:
+                if curr_percentage < 100:
+                    curr_basis_start = curr_date
+                    curr_basis_percentage = 100 - curr_percentage
+            else:
+                if not curr_basis_percentage == 100 - curr_percentage:
+                    allocations.append({
+                        "project": "Basis",
+                        "financing": "external",
+                        "name": person["name"],
+                        "start_date": curr_basis_start,
+                        "end_date": datetime.datetime.replace(prev_date, day=28),
+                        "percentage": curr_basis_percentage})
+                    if curr_percentage < 100:
+                        curr_basis_start = curr_date
+                        curr_basis_percentage = 100 - curr_percentage
+                    else:
+                        curr_basis_start = None
+                        curr_basis_percentage = None
+            prev_date = curr_date
+        if curr_basis_start is not None:
+            allocations.append({
+                "project": "Basis",
+                "financing": "external",
+                "name": person["name"],
+                "start_date": curr_basis_start,
+                "end_date": datetime.datetime.replace(prev_date, day=28),
+                "percentage": curr_basis_percentage})
+
+    return allocations
 
 
 def make_gantt_plot(projects, allocations, personnel,
@@ -51,20 +115,24 @@ def make_gantt_plot(projects, allocations, personnel,
     while not plot_utils.is_last_day_of_month(end_time):
         end_time = end_time + datetime.timedelta(days=1)
 
-    proj_person_mapping = {}
+    project_count = []
+    allocations = fill_basis(personnel, allocations, start_time, end_time)
 
     fig, axs = plt.subplots()
     fig.set_figheight(18)
     fig.set_figwidth(32)
     num_entries = len(projects)
     for allocation in allocations:
-        if allocation['project'] not in proj_person_mapping.keys():
-            proj_person_mapping[allocation['project']] = []
-        if allocation['name'] in proj_person_mapping[allocation['project']]:
-            continue
-        proj_person_mapping[allocation['project']].append(allocation['name'])
-        num_entries += 1
+        if allocation['financing'] == 'internal':
+            if f'{allocation['project']}_{allocation['name']}_internal' not in project_count:
+                project_count.append(f'{allocation['project']}_{allocation['name']}_internal')
+                num_entries += 1
+        elif allocation['financing'] == 'external':
+            if f'{allocation['project']}_{allocation['name']}_external' not in project_count:
+                project_count.append(f'{allocation['project']}_{allocation['name']}_external')
+                num_entries += 1
 
+    print(num_entries)
     plot_height = num_entries
     bar_height = 1
 
@@ -81,21 +149,30 @@ def make_gantt_plot(projects, allocations, personnel,
         ticks.insert(0, project['name'])
         y0 -= bar_height
         for person in personnel:
-            tick_inserted = False
-            was_found = False
-            for allocation in allocations:
-                if allocation['project'] == project['name'] and allocation['name'] == person['name']:
-                    was_found = True
-                    if not tick_inserted:
-                        axs.hlines(y0, xmin=start_time, xmax=end_time, color='k')
-                        ticks.insert(0, allocation['name'])
-                        tick_inserted = True
-                    axs = gantt_plot_allocation(allocation, axs, bar_height, y0,
-                                                color=curr_color,
-                                                start_time=start_time,
-                                                end_time=end_time)
-            if was_found:
-                y0 -= bar_height
+            for financing in ('external', 'internal'):
+                was_found = False
+                tick_inserted = False
+                for allocation in allocations:
+                    if (allocation['project'] == project['name'] and
+                            allocation['name'] == person['name'] and
+                            allocation['financing'] == financing):
+                        was_found = True
+                        if not tick_inserted:
+                            axs.hlines(y0, xmin=start_time, xmax=end_time, color='k')
+                            ticks.insert(0, allocation['name'])
+                            tick_inserted = True
+                        if financing == 'external':
+                            hatch = None
+                        else:
+                            hatch = '//'
+                        axs = gantt_plot_allocation(allocation, axs,
+                                                    bar_height, y0,
+                                                    color=curr_color,
+                                                    start_time=start_time,
+                                                    end_time=end_time,
+                                                    hatch=hatch)
+                if was_found:
+                    y0 -= bar_height
     axs.set_xlim(start_time, end_time)
     axs.set_ylim(0.5, num_entries+0.5)
     axs.xaxis.set_major_formatter(mdates.DateFormatter('%m-%Y'))
